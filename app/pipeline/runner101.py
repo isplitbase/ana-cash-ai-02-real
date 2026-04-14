@@ -5,11 +5,13 @@ import shutil
 import subprocess
 import tempfile
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict
 
-import boto3
+import google.auth
+import google.auth.transport.requests
+from google.cloud import storage as gcs_storage
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 COLAB_SCRIPT = PROJECT_ROOT / "app" / "pipeline" / "originals" / "colab101.py"
@@ -189,52 +191,44 @@ def _patch_report_html_for_cloudrun(html_path: Path, port_value: str | None = No
     html_path.write_text(new_html, encoding="utf-8")
 
 
-def _s3_client():
-    access_key = os.getenv("S3_ACCESS_KEY")
-    secret_key = os.getenv("S3_SECRET_KEY")
-    region = os.getenv("S3_REGION")
-    if not access_key or not secret_key or not region:
-        raise RuntimeError(
-            "S3環境変数が不足しています。"
-            "S3_ACCESS_KEY / S3_SECRET_KEY / S3_REGION を設定してください。"
-        )
-
-    return boto3.client(
-        "s3",
-        region_name=region,
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-    )
-
-
 def _upload_html_and_presign(html_path: Path) -> str:
-    bucket = os.getenv("S3_BUCKET")
+    bucket = os.getenv("GCS_BUCKET")
     if not bucket:
-        raise RuntimeError("S3_BUCKET が未設定です（例: zlite）")
+        raise RuntimeError("GCS_BUCKET が未設定です（例: zlite）")
 
-    prefix = os.getenv("S3_PREFIX", "cash-ai-02/")
+    prefix = os.getenv("GCS_PREFIX", "cash-ai-02/")
     if prefix and not prefix.endswith("/"):
         prefix += "/"
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     key = f"{prefix}{ts}_{uuid.uuid4().hex}.html"
 
-    s3 = _s3_client()
-    s3.upload_file(
-        Filename=str(html_path),
-        Bucket=bucket,
-        Key=key,
-        ExtraArgs={
-            "ContentType": "text/html; charset=utf-8",
-            "CacheControl": "no-store",
-        },
+    # ADC で認証情報を取得し、アクセストークンを更新する
+    # Cloud Run では Compute Engine credentials が返る（秘密鍵なし）
+    # generate_signed_url には service_account_email + access_token を渡すことで
+    # IAM SignBlob API 経由で署名させる
+    credentials, project = google.auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    auth_req = google.auth.transport.requests.Request()
+    credentials.refresh(auth_req)
+
+    client = gcs_storage.Client(credentials=credentials, project=project)
+    blob = client.bucket(bucket).blob(key)
+    blob.upload_from_filename(
+        str(html_path),
+        content_type="text/html; charset=utf-8",
     )
 
-    return s3.generate_presigned_url(
-        ClientMethod="get_object",
-        Params={"Bucket": bucket, "Key": key},
-        ExpiresIn=PRESIGNED_EXPIRES_SECONDS,
+    # service_account_email + access_token を使って IAM 経由で署名付きURL生成
+    signed_url = blob.generate_signed_url(
+        expiration=timedelta(seconds=PRESIGNED_EXPIRES_SECONDS),
+        method="GET",
+        version="v4",
+        service_account_email=credentials.service_account_email,
+        access_token=credentials.token,
     )
+    return signed_url
 
 
 def run_colab101(payload: Any) -> Dict[str, Any]:
