@@ -4,3 +4,4 @@ openai>=2.0.0
 python-dotenv
 openpyxl==3.1.5
 google-cloud-storage
+requests

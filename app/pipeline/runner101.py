@@ -4,6 +4,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Any, Dict
 
 import google.auth
 import google.auth.transport.requests
+import requests
 from google.cloud import storage as gcs_storage
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -19,6 +21,18 @@ OUTPUT_JSON = "output.json"
 OUTPUT_UPDATED_JSON = "output_updated.json"
 HTML_FILE = "report.html"
 PRESIGNED_EXPIRES_SECONDS = 7 * 24 * 60 * 60
+
+# 署名URLの到達性チェック関連の設定（環境変数で上書き可能）
+# - HTML_VERIFY_WAIT_SECONDS: 1回あたりの待機秒数（デフォルト 20秒）
+# - HTML_VERIFY_RETRIES_PER_ATTEMPT: 1回の生成あたり、何回チェックを試すか
+#     （デフォルト 2回 = 20s 待って1回目、ダメなら更に 20s 待って2回目）
+# - HTML_MAX_REGENERATIONS: 全部失敗した場合に HTML を再生成し直す最大回数
+#     （デフォルト 1 = 初回 + 再生成1回 = 計2回まで生成）
+# - HTML_VERIFY_REQUEST_TIMEOUT: 1リクエストのHTTPタイムアウト秒数（デフォルト 10秒）
+HTML_VERIFY_WAIT_SECONDS = int(os.getenv("HTML_VERIFY_WAIT_SECONDS", "20"))
+HTML_VERIFY_RETRIES_PER_ATTEMPT = int(os.getenv("HTML_VERIFY_RETRIES_PER_ATTEMPT", "2"))
+HTML_MAX_REGENERATIONS = int(os.getenv("HTML_MAX_REGENERATIONS", "1"))
+HTML_VERIFY_REQUEST_TIMEOUT = int(os.getenv("HTML_VERIFY_REQUEST_TIMEOUT", "10"))
 
 
 def _extract_port(payload: Any) -> str | None:
@@ -231,7 +245,32 @@ def _upload_html_and_presign(html_path: Path) -> str:
     return signed_url
 
 
-def run_colab101(payload: Any) -> Dict[str, Any]:
+def _verify_url_accessible(url: str, timeout_s: int = HTML_VERIFY_REQUEST_TIMEOUT) -> tuple:
+    """
+    署名URLにアクセスして200が返るかを確認する。
+    V4 署名URLは method=GET で署名しているため GET で確認する。
+    stream=True にしてレスポンスボディは読まずに close する。
+
+    戻り値: (アクセス成功か(bool), 詳細メッセージ(str))
+    """
+    try:
+        r = requests.get(url, stream=True, timeout=timeout_s, allow_redirects=True)
+        try:
+            status = r.status_code
+        finally:
+            r.close()
+        if status == 200:
+            return True, f"OK (status={status})"
+        return False, f"NG (status={status})"
+    except Exception as e:
+        return False, f"NG (exception={e!r})"
+
+
+def _run_colab101_once(payload: Any) -> Dict[str, Any]:
+    """
+    colab101 を 1 回だけ走らせて HTML を生成・GCS にアップして署名URLを返す。
+    呼び出し側でリトライ／再生成のループ制御を行う。
+    """
     run_dir = Path(tempfile.mkdtemp(prefix="cashai02_", dir="/tmp"))
 
     try:
@@ -264,3 +303,72 @@ def run_colab101(payload: Any) -> Dict[str, Any]:
     finally:
         if os.getenv("DEBUG_KEEP_TMP", "0") != "1":
             shutil.rmtree(run_dir, ignore_errors=True)
+
+
+def run_colab101(payload: Any) -> Dict[str, Any]:
+    """
+    colab101 を実行して HTML を生成・GCS にアップして署名URLを返す。
+
+    生成後の挙動:
+      1) HTML_VERIFY_WAIT_SECONDS (デフォルト 20秒) 待ってから署名URLに GET でアクセスし 200 が返るか確認
+      2) NG なら HTML_VERIFY_RETRIES_PER_ATTEMPT 回まで「更に 20秒待ち→再確認」を繰り返す
+         （デフォルトでは合計2回チェック = 20s 待って1回目、ダメなら更に 20s 待って2回目）
+      3) それでもダメな場合は HTML を最初から再生成する
+         （HTML_MAX_REGENERATIONS 回まで。デフォルト 1 = 初回 + 再生成1回 = 計2回まで生成）
+      4) 全て失敗したら例外を投げる
+    """
+    last_error = ""
+    total_attempts = HTML_MAX_REGENERATIONS + 1  # 初回 + 再生成回数
+
+    for attempt_idx in range(total_attempts):
+        attempt_label = f"attempt {attempt_idx + 1}/{total_attempts}"
+        try:
+            result = _run_colab101_once(payload)
+        except Exception as e:
+            last_error = f"[{attempt_label}] HTML 生成中に例外: {e!r}"
+            print(last_error, flush=True)
+            continue
+
+        html_url = result.get("html")
+        if not html_url:
+            last_error = f"[{attempt_label}] 署名URLが空でした"
+            print(last_error, flush=True)
+            continue
+
+        # 生成直後のアクセス確認ループ
+        verify_ok = False
+        verify_detail = ""
+        for check_idx in range(HTML_VERIFY_RETRIES_PER_ATTEMPT):
+            print(
+                f"[{attempt_label}] 署名URL アクセス確認の前に "
+                f"{HTML_VERIFY_WAIT_SECONDS}秒 待機 "
+                f"(check {check_idx + 1}/{HTML_VERIFY_RETRIES_PER_ATTEMPT})",
+                flush=True,
+            )
+            time.sleep(HTML_VERIFY_WAIT_SECONDS)
+            ok, detail = _verify_url_accessible(html_url)
+            verify_detail = detail
+            print(
+                f"[{attempt_label}] 署名URL アクセス確認 "
+                f"(check {check_idx + 1}/{HTML_VERIFY_RETRIES_PER_ATTEMPT}): {detail}",
+                flush=True,
+            )
+            if ok:
+                verify_ok = True
+                break
+
+        if verify_ok:
+            return result
+
+        last_error = (
+            f"[{attempt_label}] 署名URLにアクセスできませんでした "
+            f"(最終結果: {verify_detail}, url={html_url})"
+        )
+        if attempt_idx + 1 < total_attempts:
+            print(last_error + " → HTML を再生成します", flush=True)
+        else:
+            print(last_error, flush=True)
+
+    raise RuntimeError(
+        "HTML 生成・配信に失敗しました（リトライ上限に達しました）: " + last_error
+    )
