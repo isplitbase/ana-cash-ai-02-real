@@ -37,7 +37,14 @@ from openai import OpenAI
 # -----------------------------
 # 設定
 # -----------------------------
-MODEL = "gpt-4.1-mini"
+try:
+    from model_resolver import resolve_model
+except Exception:
+    import os as _os, sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    from model_resolver import resolve_model
+# AI送信前に利用可能モデル一覧を確認し、無ければ近い安定版へ自動フォールバック
+MODEL = resolve_model("openai", "gpt-4.1-mini")
 
 # Colab のユーザーシークレットから API キー取得
 api_key = userdata.get('OPENAI_API_KEY2')
