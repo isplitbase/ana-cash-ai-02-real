@@ -26,10 +26,13 @@ import json
 import os
 
 # ===== Cloud Run 適応 =====
+# runner101.py が NO_HTML=0 / DISABLE_EXCEL=1 / HTML_OUTPUT_PATH=report.html を
+# 環境変数で渡してくる。Colab で直接動かす場合は未設定なので既定値が使われる。
 NO_HTML = os.getenv("NO_HTML", "1") == "1"
 DISABLE_EXCEL = os.getenv("DISABLE_EXCEL", "1") == "1"
 HTML_OUTPUT_PATH = os.getenv("HTML_OUTPUT_PATH", "report.html")
 
+# Cloud Run には IPython が入っていない場合があるため、失敗しても続行できるようにする
 try:
     from IPython.display import HTML, display
 except Exception:
@@ -138,6 +141,7 @@ def _save_output_updated_json(payload):
         excel_updated = False
         excel_error = "DISABLE_EXCEL" if DISABLE_EXCEL else ""
         try:
+            # Cloud Run には /content/ の Excel が存在しないため転記自体をスキップする
             if DISABLE_EXCEL:
                 raise RuntimeError("DISABLE_EXCEL")
             period_numbers = payload.get("period_numbers", {}) or {}
@@ -2861,15 +2865,6 @@ window._rebuildCFTable = function(){
 
     // _calc(p_from, p_to)
     // ── 勘定科目名インデックス構築（恒久対策版）──────────────────
-    function _normAcct(s){
-      s = (s==null?"":String(s));
-      try { s = s.normalize("NFKC"); } catch(e){}
-      s = s.replace(/小計/g,"計").replace(/総計/g,"計").replace(/合計/g,"計");
-      s = s.replace(/及び|および|並びに|又は|若しくは|もしくは|の/g,"");
-      s = s.replace(/[\s\u3000・･,，、.．/／\\|~〜ー\-−▲△▼▽☆★※（）()\[\]{}【】〔〕｛｝]/g,"");
-      return s;
-    }
-
     function buildNameIndex(data) {
       var idx = {};
       var sorted = data.slice().sort(function(a,b){
@@ -2878,35 +2873,6 @@ window._rebuildCFTable = function(){
       for (var i=0; i<sorted.length; i++) {
         var name = (sorted[i]["勘定科目"]||"").trim();
         if (name && !(name in idx)) idx[name] = sorted[i];
-      }
-      var _normMap = {};
-      for (var _kk in idx) {
-        if (!idx.hasOwnProperty(_kk)) continue;
-        var _nk = _normAcct(_kk);
-        if (_nk && !(_nk in _normMap)) _normMap[_nk] = idx[_kk];
-      }
-      var _canon = [];
-      try { for (var _ak in _ACCT_JS) { if(_ACCT_JS.hasOwnProperty(_ak)) _canon = _canon.concat(_ACCT_JS[_ak]); } } catch(e){}
-      _canon = _canon.concat(['受取手形','売掛金','支払手形','買掛金','預り金','未払金',
-        '流動負債合計','固定負債合計','長期借入金','資本金','土地',
-        '有形固定資産合計','建設仮勘定','無形固定資産','繰延資産','自己株式','短期借入金',
-        'うち繰越利益剰余金','繰越利益剰余金','利益剰余金合計']);
-      var _explicit = {
-        '無形固定資産': ['無形固定資産小計','無形固定資産合計','無形固定資産計'],
-        '投資その他の資産合計': ['投資等小計','投資等合計']
-      };
-      for (var _ci=0; _ci<_canon.length; _ci++) {
-        var _c = _canon[_ci];
-        if (_c in idx) continue;
-        var _rn = _normMap[_normAcct(_c)];
-        if (_rn === undefined && _explicit[_c]) {
-          var _vs = _explicit[_c];
-          for (var _vi=0; _vi<_vs.length; _vi++) {
-            _rn = idx[_vs[_vi]]; if(_rn===undefined) _rn=_normMap[_normAcct(_vs[_vi])];
-            if (_rn !== undefined) break;
-          }
-        }
-        if (_rn !== undefined) idx[_c] = _rn;
       }
       return idx;
     }
@@ -2929,7 +2895,7 @@ window._rebuildCFTable = function(){
       短期貸付金: ["短期貸付金"],
       前受金: ["前受金","未成工事受入金","前受収益"],
       引当金_リスト: ["賞与引当金","役員賞与引当金","退職給付引当金","退職給与引当金",
-                     "退職給付に係る負債","製品保証引当金","貸倒引当金",
+                     "退職給付に係る負債","製品保証引当金",
                      "未払費用","仮受金","前受収益","預り金"],
     };
 
@@ -3043,6 +3009,9 @@ window._rebuildCFTable = function(){
         var _sc = (_r["分類"]||_r["section"]||"").trim();
         if (!_nm || _c12counted[_nm]) continue;
         if (_sc.indexOf("引当金") >= 0) {
+          // 貸倒引当金（資産の評価勘定）は分類が資産系ならc17で処理するため除外
+          var _isAsset = ["流動資産","固定資産","投資その他","有形固定","無形固定","当座"].some(function(a){return _sc.indexOf(a)>=0;});
+          if (_nm.indexOf("貸倒引当金")>=0 && _isAsset) continue;
           _c12counted[_nm] = 1;
           var _vt = _r[p_to], _vf = _r[p_from];
           _c12to   += (_vt==null||_vt==="")?0:(parseFloat(_vt)||0);
@@ -3054,23 +3023,20 @@ window._rebuildCFTable = function(){
       var c14 = Math.round(-d("受取手形"));
       var c15 = Math.round(-d("売掛金"));
       var c16 = Math.round(-ff(_ACCT_JS.棚卸資産));
-      // c17: [残差版] 流動資産合計 − 現金 − 受手 − 売掛 − 棚卸 − 有価証券 − 短期貸付
-      //   その他流動資産小計に入らない流動資産（当座資産(その他)＝有価証券の別掲等）も
-      //   必ず網羅して取りこぼし0にする。現金/受手/売掛=c14/c15、棚卸=c16、有価証券=c26、短期貸付=c27 で別計上のため控除。
-      function _ryudoTotal(pk){
-        var cand=["流動資産合計","流動資産計","流動資産の部合計"];
-        for(var i=0;i<cand.length;i++){ if(cand[i] in nameIdx) return acctFirst(nameIdx,[cand[i]],pk); }
-        return sectionSum(_data,["流動資産"],pk,{});
+      // c17: 集計行優先、なければ流動資産分類から個別科目を除いた残りを合算
+      var _c17excl = {};
+      _ACCT_JS.現金.forEach(function(n){ _c17excl[n]=1; });
+      _c17excl["受取手形"]=1; _c17excl["売掛金"]=1;
+      _ACCT_JS.棚卸資産.forEach(function(n){ _c17excl[n]=1; });
+      _ACCT_JS.有価証券.forEach(function(n){ _c17excl[n]=1; });
+      _ACCT_JS.短期貸付金.forEach(function(n){ _c17excl[n]=1; });
+      var _c17raw = dsec(_ACCT_JS.その他流動資産, ["流動資産"], _c17excl);
+      // 集計行使用時、小計に短期貸付金が含まれていれば控除
+      var _aggHitC17 = _ACCT_JS.その他流動資産.some(function(nm){ return nm in nameIdx; });
+      if (_aggHitC17 && ("短期貸付金" in nameIdx)) {
+        var _stlSec = ((nameIdx["短期貸付金"]||{})["分類"]||"").trim();
+        if (_stlSec.indexOf("流動資産") >= 0) _c17raw -= fa(_ACCT_JS.短期貸付金);
       }
-      function _c17other(pk){
-        return _ryudoTotal(pk)
-          - acctFirst(nameIdx,_ACCT_JS.現金,pk)
-          - vn("受取手形",pk) - vn("売掛金",pk)
-          - acctFirst(nameIdx,_ACCT_JS.棚卸資産,pk)
-          - acctSum(nameIdx,_ACCT_JS.有価証券,pk)
-          - acctSum(nameIdx,_ACCT_JS.短期貸付金,pk);
-      }
-      var _c17raw = _c17other(p_to) - _c17other(p_from);
       var c17 = Math.round(-_c17raw);
       var c18 = Math.round(d("支払手形"));
       var c19 = Math.round(d("買掛金"));
@@ -3203,7 +3169,6 @@ window._rebuildCFTable = function(){
       var c48 = c46+c47;
       var c49 = Math.round(genkin_to);
       var c50 = c48-c49;
-      if (c50 !== 0 && Math.abs(c50) < 1000) { c48 = c49; c50 = 0; }
 
       return {c9,c11,c12,c14,c15,c16,c17,c18,c19,c20,c20b,c21,c22,c23,c24,
               c26,c27,c28,c29,c30,c31,c34,c35,c36,c37,
@@ -4134,7 +4099,7 @@ _ACCT = {
     # c12 引当金・営業CF性流動負債（複数存在すれば合算）
     '引当金_リスト': [
         '賞与引当金', '役員賞与引当金', '退職給付引当金', '退職給与引当金',
-        '退職給付に係る負債', '製品保証引当金', '貸倒引当金',
+        '退職給付に係る負債', '製品保証引当金',  # 貸倒引当金は資産評価勘定→c17で処理
         '未払費用', '仮受金', '前受収益', '預り金',
     ],
     # c26 有価証券
@@ -4274,17 +4239,6 @@ def _agg_or_section(name_idx, data_dict, agg_candidates, section_names,
     return _section_sum(name_idx, data_dict, section_names, period, exclude_names)
 
 
-def _normalize_acct(s):
-    """勘定科目名の表記ゆれを正規化"""
-    import unicodedata as _ud, re as _re
-    s = _ud.normalize('NFKC', str(s or '')).strip()
-    s = s.replace('小計', '計').replace('総計', '計').replace('合計', '計')
-    for _w in ('及び', 'および', '並びに', '又は', '若しくは', 'もしくは', 'の'):
-        s = s.replace(_w, '')
-    s = _re.sub(r'[\s\u3000・･,，、.．/／\\|~〜ー\-−▲△▼▽☆★※（）()\[\]{}【】〔〕｛｝]', '', s)
-    return s
-
-
 def _build_name_index(data_dict):
     """勘定科目名 → dd行番号 のインデックスを構築。同名は最初の出現を使用。"""
     idx = {}
@@ -4292,36 +4246,6 @@ def _build_name_index(data_dict):
         name = str(data_dict[rn].get('勘定科目') or '').strip()
         if name and name not in idx:
             idx[name] = rn
-    _norm_map = {}
-    for _nm, _rn in list(idx.items()):
-        _nk = _normalize_acct(_nm)
-        if _nk and _nk not in _norm_map:
-            _norm_map[_nk] = _rn
-    _canon = set()
-    try:
-        for _lst in _ACCT.values():
-            _canon.update(_lst)
-    except Exception:
-        pass
-    _canon.update(['受取手形','売掛金','支払手形','買掛金','預り金','未払金',
-        '流動負債合計','固定負債合計','長期借入金','資本金','土地',
-        '有形固定資産合計','建設仮勘定','無形固定資産','繰延資産','自己株式','短期借入金',
-        'うち繰越利益剰余金','繰越利益剰余金','利益剰余金合計'])
-    _explicit = {
-        '無形固定資産': ['無形固定資産小計','無形固定資産合計','無形固定資産計'],
-        '投資その他の資産合計': ['投資等小計','投資等合計'],
-    }
-    for _c in _canon:
-        if _c in idx:
-            continue
-        _rn = _norm_map.get(_normalize_acct(_c))
-        if _rn is None:
-            for _v in _explicit.get(_c, []):
-                _rn = idx.get(_v) or _norm_map.get(_normalize_acct(_v))
-                if _rn is not None:
-                    break
-        if _rn is not None:
-            idx[_c] = _rn
     return idx
 
 # ==================================================================
@@ -4776,6 +4700,9 @@ def calc_cf_from_data_dict(data_dict, closing_dates):
             if not nm0 or nm0 in _c12_counted:
                 continue
             if '引当金' in sec0:
+                # 貸倒引当金（資産の評価勘定）は分類が資産系ならc17で処理するため除外
+                if '貸倒引当金' in nm0 and any(a in sec0 for a in ['流動資産','固定資産','投資その他','有形固定','無形固定','当座']):
+                    continue
                 # 集計見出し（分類名と同じ「引当金の部」など）も実残高があれば計上対象
                 _c12_counted.add(nm0)
                 _mark_used(nm0)
@@ -4790,26 +4717,28 @@ def calc_cf_from_data_dict(data_dict, closing_dates):
         c15 = i(-d('売掛金'))
         # c16 棚卸資産: 集計行(棚卸資産計)優先、なければ候補リストの個別科目
         c16 = i(-df(_ACCT['棚卸資産']))       # 棚卸資産（候補リスト・個別科目対応済み）
-        # c17 その他流動資産: [残差版] 流動資産合計 − 現金 − 受手 − 売掛 − 棚卸 − 有価証券 − 短期貸付
-        #   その他流動資産小計(行22)に入らない流動資産（例：当座資産(その他)＝有価証券が
-        #   別掲されているケース）も必ず網羅して取りこぼし0にする。
-        #   現金/受手/売掛=c14/c15、棚卸=c16、有価証券=c26、短期貸付=c27 で別計上するため控除。
-        def _ryudo_total(period):
-            for _nm in ['流動資産合計', '流動資産計', '流動資産の部合計']:
-                if _nm in name_idx:
-                    _mark_used(_nm)
-                    return _acct_first(name_idx, data_dict, [_nm], period)
-            return _section_sum_tracked(['流動資産'], period)
-        def _cash_at(period):
-            return genkin_to if period == p_to else (genkin_from if period == p_from else 0.0)
-        def _c17_other(period):
-            return (_ryudo_total(period)
-                    - _cash_at(period)
-                    - _v('受取手形', period) - _v('売掛金', period)
-                    - ff(_ACCT['棚卸資産'], period)
-                    - fa(_ACCT['有価証券'], period)
-                    - fa(_ACCT['短期貸付金'], period))
-        _c17_raw = _c17_other(p_to) - _c17_other(p_from)
+        # c17 その他流動資産: 集計行優先、なければ流動資産分類から
+        # 現金・受取手形・売掛金・棚卸資産系を除いた残りを合算
+        _c17_exclude = set()
+        _c17_exclude.update(_ACCT['現金'])
+        _c17_exclude.update(['受取手形', '売掛金'])
+        _c17_exclude.update(_ACCT['棚卸資産'])
+        _c17_exclude.update(_ACCT['有価証券'])    # c26で計上
+        _c17_exclude.update(_ACCT['短期貸付金'])  # c27で計上
+        # 集計行を使う場合、有価証券・短期貸付金が小計に含まれていれば控除
+        _c17_raw = dsec(_ACCT['その他流動資産'], ['流動資産'], _c17_exclude)
+        # 集計行が存在する場合は、小計に含まれる有価証券・短期貸付金を別途控除
+        _agg_hit_c17 = any(nm in name_idx for nm in _ACCT['その他流動資産'])
+        if _agg_hit_c17:
+            # 小計に短期貸付金が含まれる場合のみ控除（分類が「流動資産」なら含まれる）
+            _stl_sec = str(data_dict.get(name_idx.get('短期貸付金',-1),{}).get('分類','')).strip()
+            if '短期貸付金' in name_idx and ('流動資産' in _stl_sec):
+                _c17_raw -= da(_ACCT['短期貸付金'])
+            _yuk_sec = str(data_dict.get(name_idx.get('有価証券',-1),{}).get('分類','')).strip()
+            if '有価証券' in name_idx and ('流動資産' in _yuk_sec):
+                # 有価証券が当座資産（その他流動資産小計外）にある場合は控除不要
+                # その他流動資産小計に含まれる場合のみ控除（通常は含まれない）
+                pass
         c17 = i(-_c17_raw)
         c18 = i(d('支払手形'))
         c19 = i(d('買掛金'))
@@ -4927,9 +4856,6 @@ def calc_cf_from_data_dict(data_dict, closing_dates):
         c48 = i(c46+c47)
         c49 = i(genkin_to)
         c50 = c48-c49
-        if 0 < abs(c50) < 1000:
-            c48 = c49
-            c50 = 0
 
         return dict(
             c9=c9, c11=c11, c12=c12, c14=c14, c15=c15, c16=c16, c17=c17,
@@ -5391,7 +5317,7 @@ except Exception as _e:
     traceback.print_exc()
 
 # ===== ビルド版数刻印（リリース確認用）=====
-_BUILD_VERSION = "cash-ai-02 / src:_25_汎用化対応 / patch:正規化+端数スナップ / build:2026-06-25"
+_BUILD_VERSION = "cash-ai-02 / src:CF_v26_kashidaore / patch:貸倒引当金は資産評価勘定としてc17処理 / build:2026-08-20"
 _build_stamp_comment = f'<!-- BUILD_VERSION: {_BUILD_VERSION} -->'
 _build_stamp_visible = (
     f'<div data-build-version="{_BUILD_VERSION}"'
@@ -5408,6 +5334,8 @@ _final_html = (
     + action_buttons_vertical
     + _build_stamp_visible
 )
+# Colab 上では画面表示、Cloud Run では report.html への書き出しを行う。
+# runner101.py は report.html が生成されない場合にエラーとするため、この書き出しは必須。
 if (not NO_HTML) and display and HTML:
     display(HTML(_final_html))
 if not NO_HTML:
