@@ -4549,6 +4549,189 @@ def format_validation_log(alerts, fixes):
     return ''.join(parts)
 
 
+# ==================================================================
+# データ不整合の検知・警告層（detect_data_anomalies）
+# CF計算の手前で入力データの不整合を検出して報告する。
+# 修復は行わず検知・警告に徹する（人間判断のための材料提供）。
+#   A: 現金・流動資産の重複読み取り（同一口座の二重計上）
+#   C: 販管費内訳の欠落（内訳ページが読み取れず費目が丸められる）
+#   D: 製造原価の誤混入（商品売買業に別書類の製造原価が混入）
+# ==================================================================
+
+def detect_data_anomalies(data_dict, closing_dates, extra=None):
+    """
+    入力データの不整合を検知する。
+    extra: {'販売費':[...], '製造原価':[...]} 等の内訳データ（任意）
+    戻り値: list[dict]  各異常の詳細
+    """
+    def _dn(v):
+        try:
+            return float(str(v).replace(',', '')) if v not in (None, '', '""', '　') else 0.0
+        except:
+            return 0.0
+
+    p_from = closing_dates.get('前期', '前期')
+    p_to = closing_dates.get('今期', '今期')
+    anomalies = []
+    rows = list(data_dict.values())
+
+    def _v(row, p):
+        return _dn(row.get(p, 0))
+
+    def _find_row(name):
+        for r in rows:
+            if str(r.get('勘定科目', '')).strip() == name:
+                return r
+        return None
+
+    def _is_agg(name):
+        return any(k in name for k in ['合計', '計']) or name.endswith('の部')
+
+    _SUBTOTAL_NAMES = {
+        '当座資産', '棚卸資産', 'その他流動資産', 'その他の流動資産',
+        '有形固定資産', '無形固定資産', '投資その他の資産', '投資その他資産',
+        '繰延資産', '引当金の部',
+    }
+
+    def _has_detail_under(subtotal_name, section):
+        for r in rows:
+            nm = str(r.get('勘定科目', '')).strip()
+            sc = str(r.get('分類', '') or r.get('section', '')).strip()
+            if sc == section and nm != subtotal_name and nm not in _SUBTOTAL_NAMES \
+               and nm != '流動資産' and not _is_agg(nm):
+                return True
+        return False
+
+    # ── 【A】現金・流動資産の重複読み取り ──────────────
+    ryudo_total = _find_row('流動資産合計') or _find_row('流動資産')
+    if ryudo_total:
+        for period in [p_from, p_to]:
+            total = _v(ryudo_total, period)
+            meisai = 0.0
+            detail_rows = []
+            for r in rows:
+                name = str(r.get('勘定科目', '')).strip()
+                sec = str(r.get('分類', '') or r.get('section', '')).strip()
+                if not name or name == '流動資産' or _is_agg(name):
+                    continue
+                if name in _SUBTOTAL_NAMES and _has_detail_under(name, sec):
+                    continue
+                if sec == '流動資産' or ('流動資産' in sec and '合計' not in sec):
+                    val = _v(r, period)
+                    if val != 0:
+                        meisai += val
+                        detail_rows.append((name, val))
+            diff = meisai - total
+            if abs(diff) > 0.5:
+                dup = []
+                for i in range(len(detail_rows)):
+                    for j in range(i + 1, len(detail_rows)):
+                        n1, v1 = detail_rows[i]
+                        n2, v2 = detail_rows[j]
+                        if abs(v1 - v2) < 0.5 and abs(v1 - diff) < 0.5:
+                            dup.append((n1, n2, v1))
+                # 差額と一致する同額ペアがある場合のみ報告（誤検知回避）
+                if dup:
+                    n1, n2, v = dup[0]
+                    anomalies.append({
+                        'type': 'A', 'severity': 'warning',
+                        'title': '現金・流動資産の重複読み取りの疑い',
+                        'detail': f'{period}: 明細合計({meisai:,.0f})と流動資産合計({total:,.0f})の差が{diff:,.0f}。'
+                                  f'同額の「{n1}」「{n2}」(各{v:,.0f})が重複読み取りの可能性。',
+                        'suggestion': f'「{n1}」または「{n2}」のいずれかが同一口座の二重計上でないか確認してください。',
+                        'items': [n1, n2],
+                    })
+
+    # ── 【D】製造原価の誤混入 ──────────────────────
+    if extra and '製造原価' in extra and extra['製造原価']:
+        sei = extra['製造原価']
+        sei_total = sum(_dn(r.get(p_to, {}).get('金額') if isinstance(r.get(p_to), dict) else r.get(p_to)) for r in sei)
+        uriage = _find_row('売上原価') or _find_row('【売上原価】')
+        has_shohin = (_find_row('期首商品棚卸高') or _find_row('期首製品・商品棚高')
+                      or _find_row('期末商品棚卸高') or _find_row('期末製品・商品棚卸高'))
+        if uriage is not None:
+            ug = _v(uriage, p_to)
+            if sei_total > 0 and ug > 0 and sei_total > ug * 3 and has_shohin:
+                anomalies.append({
+                    'type': 'D', 'severity': 'warning',
+                    'title': '製造原価の誤混入の疑い',
+                    'detail': f'製造原価合計({sei_total:,.0f})が売上原価({ug:,.0f})の3倍超。'
+                              f'かつ商品売買業の兆候（商品棚卸あり）。別書類の製造原価が混入した可能性。',
+                    'suggestion': '商品売買業のデータに製造原価ページが誤混入していないか、帳票のページ分類を確認してください。',
+                    'items': [],
+                })
+
+    # ── 【C】販管費内訳の欠落 ──────────────────────
+    if extra and '販売費' in extra and extra['販売費']:
+        han = extra['販売費']
+
+        def _hv(r, pk):
+            v = r.get(pk, {})
+            return _dn(v.get('金額') if isinstance(v, dict) else v)
+
+        def _count(pk):
+            cnt = 0
+            maxi = 0.0
+            for r in han:
+                name = str(r.get('勘定科目', '')).strip()
+                if name == '販売費及び一般管理費' or '合計' in name:
+                    continue
+                val = _hv(r, pk)
+                if val != 0:
+                    cnt += 1
+                    maxi = max(maxi, abs(val))
+            return cnt, maxi
+
+        cnt_from, max_from = _count(p_from)
+        cnt_to, max_to = _count(p_to)
+        pl_hankan = _find_row('販売費及び一般管理費')
+        pl_from = _v(pl_hankan, p_from) if pl_hankan else 0
+        pl_to = _v(pl_hankan, p_to) if pl_hankan else 0
+
+        for lp, cnt, maxi, pl_val, other in [
+            (p_from, cnt_from, max_from, pl_from, cnt_to),
+            (p_to, cnt_to, max_to, pl_to, cnt_from),
+        ]:
+            if pl_val != 0 and cnt <= 2 and other >= 5:
+                conc = (maxi / abs(pl_val) * 100) if pl_val else 0
+                anomalies.append({
+                    'type': 'C', 'severity': 'warning',
+                    'title': '販管費内訳の欠落の疑い',
+                    'detail': f'{lp}: PL本体の販管費は{pl_val:,.0f}円だが、内訳の費目が{cnt}件しかありません'
+                              f'（他期は{other}件）。',
+                    'suggestion': f'{lp}の販管費内訳ページが読み取れていない可能性があります。'
+                                  f'減価償却費など個別費目がCFに反映されないため、内訳ページの読み取りを確認してください。',
+                    'items': [],
+                })
+
+    return anomalies
+
+
+def format_anomalies_log(anomalies):
+    """検知結果をHTMLパネルにする"""
+    if not anomalies:
+        return ''
+    rows_html = []
+    for a in anomalies:
+        color = '#c0392b' if a.get('severity') == 'error' else '#8a6d00'
+        bg = '#fdedec' if a.get('severity') == 'error' else '#fff8e1'
+        icon = '❌' if a.get('severity') == 'error' else '⚠️'
+        rows_html.append(
+            f'<div style="background:{bg};border-left:4px solid {color};padding:8px 12px;margin:6px 0;">'
+            f'<div style="font-weight:bold;color:{color};">{icon} [{a["type"]}] {a["title"]}</div>'
+            f'<div style="margin:4px 0;color:#333;font-size:13px;">{a["detail"]}</div>'
+            f'<div style="color:#555;font-size:12px;">→ {a["suggestion"]}</div></div>'
+        )
+    return (
+        '<div style="border:1px solid #f0c419;border-radius:6px;padding:10px;margin:12px 0;background:#fffdf5;">'
+        f'<div style="font-weight:bold;font-size:15px;color:#8a6d00;margin-bottom:6px;">'
+        f'⚠️ データ不整合の検知（{len(anomalies)}件）</div>'
+        '<div style="font-size:12px;color:#666;margin-bottom:8px;">'
+        '以下はCF計算の手前（帳票読み取り）に起因する可能性があります。CF計算書の数値をご確認ください。</div>'
+        + ''.join(rows_html) + '</div>'
+    )
+
+
 def calc_cf_from_data_dict(data_dict, closing_dates):
     """
     勘定科目名でdata_dictを参照してCFを計算する（恒久対策版）。
@@ -5308,8 +5491,29 @@ try:
         print(f"[未割当て科目] {len(_unassigned)}件の要確認科目を検出:",
               " / ".join(f"{u['name']}(行{u['rn']})" for u in _unassigned))
 
+    # データ不整合の検知（検知・警告層：現金重複・製造原価混入・販管費欠落）
+    try:
+        _extra = {'製造原価': [], '販売費': []}
+        for _r in data_dict.values():
+            _sec = str(_r.get('分類', '') or '').strip()
+            _nm = str(_r.get('勘定科目', '') or '').strip()
+            _pack = {'勘定科目': _nm,
+                     '前々期': _r.get('前々期', 0), '前期': _r.get('前期', 0), '今期': _r.get('今期', 0)}
+            if '製造原価' in _sec:
+                _extra['製造原価'].append(_pack)
+            if '販売費' in _sec or '一般管理費' in _sec:
+                _extra['販売費'].append(_pack)
+        _anomalies = detect_data_anomalies(data_dict, closing_dates, _extra)
+        _anomalies_html = format_anomalies_log(_anomalies)
+        if _anomalies:
+            print(f"[データ不整合] {len(_anomalies)}件検知:",
+                  " / ".join(f"[{a['type']}]{a['title']}" for a in _anomalies))
+    except Exception as _ae:
+        _anomalies_html = ''
+        print(f"⚠️ 不整合検知でエラー: {_ae}")
+
     _keiei_html = generate_keiei_shihyo_html(data_dict, closing_dates)
-    full_html = full_html + _validation_html + generate_cf_html(_cf_data) + _approval_html + create_table_rows([(157, 159)], "入力項目／集計項目") + _keiei_html
+    full_html = full_html + _validation_html + _anomalies_html + generate_cf_html(_cf_data) + _approval_html + create_table_rows([(157, 159)], "入力項目／集計項目") + _keiei_html
     print(f"✅ CF計算書HTML生成完了: 前期={_cf_data['period_zenki']}, 今期={_cf_data['period_konki']}")
 except Exception as _e:
     import traceback
@@ -5317,7 +5521,7 @@ except Exception as _e:
     traceback.print_exc()
 
 # ===== ビルド版数刻印（リリース確認用）=====
-_BUILD_VERSION = "cash-ai-02 / src:CF_v26_kashidaore / patch:貸倒引当金は資産評価勘定としてc17処理 / build:2026-08-20"
+_BUILD_VERSION = "cash-ai-02 / src:CF_v27_anomaly_detect / patch:データ不整合の検知・警告を追加 / build:2026-08-21"
 _build_stamp_comment = f'<!-- BUILD_VERSION: {_BUILD_VERSION} -->'
 _build_stamp_visible = (
     f'<div data-build-version="{_BUILD_VERSION}"'
