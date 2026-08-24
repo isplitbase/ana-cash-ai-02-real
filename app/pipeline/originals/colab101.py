@@ -5020,17 +5020,43 @@ def calc_cf_from_data_dict(data_dict, closing_dates):
         c42 = i(d('資本金') + df(_ACCT['資本剰余金']))  # 資本剰余金（候補リスト）
         c43 = i(d('自己株式')) if '自己株式' in name_idx else 0
 
-        # c44: 配当金＋役員賞与（繰越利益剰余金ベース自動計算）
-        _rieki_candidates = [
+        # c44: 配当金＋役員賞与（利益剰余金全体ベース自動計算） ── v27-1
+        # v27 は「繰越利益剰余金」だけを基準にしていたため、準備金・積立金の取崩に
+        # 伴う現金流出を捕捉できず CF照合差が発生していた（例: ai_case 100071 で +25,000,000）。
+        # v27-1 では「利益剰余金全体」を基準とすることで、準備金・積立金の変動も含めて
+        # 配当・利益処分による現金流出を推定する。
+        # 優先度: 1) 利益剰余金合計/利益剰余金  2) 繰越利益剰余金 + 準備金・積立金
+        _rieki_total_candidates = [
+            '利益剰余金合計',
+            '利益剰余金',
+        ]
+        _rieki_partial_candidates = [
             'うち繰越利益剰余金',
             '繰越利益剰余金',
             '繰越利益剰余金・前期末残高',
-            '利益剰余金合計',
         ]
-        rieki_key = next((k for k in _rieki_candidates if k in name_idx), None)
-        rieki_rn = name_idx.get(rieki_key) if rieki_key else None
-        if rieki_key: _mark_used(rieki_key)
-        rieki70_diff = (_dd(rieki_rn, p_to) - _dd(rieki_rn, p_from)) if rieki_rn else 0
+        _reserve_candidates = [
+            'うち準備金、積立金',
+            '準備金・積立金',
+            '利益準備金',
+        ]
+        rieki70_diff = 0
+        _rieki_total_key = next((k for k in _rieki_total_candidates if k in name_idx), None)
+        if _rieki_total_key:
+            _rn = name_idx[_rieki_total_key]
+            rieki70_diff = _dd(_rn, p_to) - _dd(_rn, p_from)
+            _mark_used(_rieki_total_key)
+        else:
+            _partial_key = next((k for k in _rieki_partial_candidates if k in name_idx), None)
+            _reserve_key = next((k for k in _reserve_candidates if k in name_idx), None)
+            if _partial_key:
+                _rn = name_idx[_partial_key]
+                rieki70_diff += _dd(_rn, p_to) - _dd(_rn, p_from)
+                _mark_used(_partial_key)
+            if _reserve_key:
+                _rn = name_idx[_reserve_key]
+                rieki70_diff += _dd(_rn, p_to) - _dd(_rn, p_from)
+                _mark_used(_reserve_key)
         c44 = -i(_dd(154, p_to) - rieki70_diff)
 
         c45 = c39+c40+c41+c42+c43+c44
@@ -5521,7 +5547,7 @@ except Exception as _e:
     traceback.print_exc()
 
 # ===== ビルド版数刻印（リリース確認用）=====
-_BUILD_VERSION = "cash-ai-02 / src:CF_v27_anomaly_detect / patch:データ不整合の検知・警告を追加 / build:2026-08-21"
+_BUILD_VERSION = "cash-ai-02 / src:CF_v27_1_capital_reconciliation / patch:配当推定を利益剰余金全体ベースに修正 / build:2026-08-24"
 _build_stamp_comment = f'<!-- BUILD_VERSION: {_BUILD_VERSION} -->'
 _build_stamp_visible = (
     f'<div data-build-version="{_BUILD_VERSION}"'
