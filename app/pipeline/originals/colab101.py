@@ -3119,17 +3119,37 @@ window._rebuildCFTable = function(){
       var c42 = Math.round(d("資本金") + ff(_ACCT_JS.資本剰余金));
       var c43 = ("自己株式" in nameIdx) ? Math.round(d("自己株式")) : 0;
 
-      // c44: 繰越利益剰余金ベース自動計算
-      var _rCandidates = [
-        "うち繰越利益剰余金","繰越利益剰余金",
-        "繰越利益剰余金・前期末残高","利益剰余金合計"
-      ];
+      // c44: 配当金＋役員賞与（利益剰余金全体ベース自動計算） ── v27-1
+      // v27 は「繰越利益剰余金」のみを基準にしていたため、準備金・積立金の取崩に伴う
+      // 現金流出を捕捉できず CF照合差が発生していた（例: ai_case 100071 で +25,000,000）。
+      // v27-1 では「利益剰余金全体」を基準にすることで、準備金・積立金の変動も含めて
+      // 配当・利益処分による現金流出を推定する。
+      // 優先度: 1) 利益剰余金合計/利益剰余金  2) 繰越利益剰余金 + 準備金・積立金
+      var _rTotalCandidates   = ["利益剰余金合計","利益剰余金"];
+      var _rPartialCandidates = ["うち繰越利益剰余金","繰越利益剰余金","繰越利益剰余金・前期末残高"];
+      var _rReserveCandidates = ["うち準備金、積立金","準備金・積立金","利益準備金"];
       var rieki_to = 0, rieki_from = 0;
-      for (var ci=0; ci<_rCandidates.length; ci++) {
-        if (_rCandidates[ci] in nameIdx) {
-          rieki_to   = vn(_rCandidates[ci], p_to);
-          rieki_from = vn(_rCandidates[ci], p_from);
-          break;
+      var _rTotalKey = null;
+      for (var _ci=0; _ci<_rTotalCandidates.length; _ci++) {
+        if (_rTotalCandidates[_ci] in nameIdx) { _rTotalKey = _rTotalCandidates[_ci]; break; }
+      }
+      if (_rTotalKey) {
+        rieki_to   = vn(_rTotalKey, p_to);
+        rieki_from = vn(_rTotalKey, p_from);
+      } else {
+        for (var _pi=0; _pi<_rPartialCandidates.length; _pi++) {
+          if (_rPartialCandidates[_pi] in nameIdx) {
+            rieki_to   += vn(_rPartialCandidates[_pi], p_to);
+            rieki_from += vn(_rPartialCandidates[_pi], p_from);
+            break;
+          }
+        }
+        for (var _si=0; _si<_rReserveCandidates.length; _si++) {
+          if (_rReserveCandidates[_si] in nameIdx) {
+            rieki_to   += vn(_rReserveCandidates[_si], p_to);
+            rieki_from += vn(_rReserveCandidates[_si], p_from);
+            break;
+          }
         }
       }
       var c44 = -Math.round(rdd(154, p_to) - (rieki_to - rieki_from));
