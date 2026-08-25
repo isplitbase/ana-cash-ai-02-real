@@ -3008,10 +3008,13 @@ window._rebuildCFTable = function(){
         var _nm = (_r["勘定科目"]||"").trim();
         var _sc = (_r["分類"]||_r["section"]||"").trim();
         if (!_nm || _c12counted[_nm]) continue;
-        if (_sc.indexOf("引当金") >= 0) {
-          // 貸倒引当金（資産の評価勘定）は分類が資産系ならc17で処理するため除外
-          var _isAsset = ["流動資産","固定資産","投資その他","有形固定","無形固定","当座"].some(function(a){return _sc.indexOf(a)>=0;});
-          if (_nm.indexOf("貸倒引当金")>=0 && _isAsset) continue;
+        // v27-2: 分類欄が空/未設定の帳票にも対応するため、勘定科目名でも判定
+        // 貸倒引当金は資産評価勘定なので、分類欄の有無に関わらず常に除外（c17 で純額処理）
+        if (_sc.indexOf("引当金") >= 0 || _nm.indexOf("引当金") >= 0) {
+          if (_nm.indexOf("貸倒引当金") >= 0) {
+            // 貸倒引当金は常に除外（r22 その他流動資産で純額処理されるため）
+            continue;
+          }
           _c12counted[_nm] = 1;
           var _vt = _r[p_to], _vf = _r[p_from];
           _c12to   += (_vt==null||_vt==="")?0:(parseFloat(_vt)||0);
@@ -4902,9 +4905,12 @@ def calc_cf_from_data_dict(data_dict, closing_dates):
             sec0 = str(row0.get('分類') or row0.get('section') or '').strip()
             if not nm0 or nm0 in _c12_counted:
                 continue
-            if '引当金' in sec0:
-                # 貸倒引当金（資産の評価勘定）は分類が資産系ならc17で処理するため除外
-                if '貸倒引当金' in nm0 and any(a in sec0 for a in ['流動資産','固定資産','投資その他','有形固定','無形固定','当座']):
+            # v27-2: 分類欄が空/未設定の帳票にも対応するため、勘定科目名でも判定
+            # 貸倒引当金は資産評価勘定なので、分類欄の有無に関わらず常に除外（c17 で純額処理）
+            if '引当金' in sec0 or '引当金' in nm0:
+                if '貸倒引当金' in nm0:
+                    # 貸倒引当金は常に除外（分類欄が空でも/資産系でなくても）
+                    # 理由: r22 その他流動資産小計で純額処理されるため、c12 で拾うと二重計上になる
                     continue
                 # 集計見出し（分類名と同じ「引当金の部」など）も実残高があれば計上対象
                 _c12_counted.add(nm0)
@@ -5567,7 +5573,7 @@ except Exception as _e:
     traceback.print_exc()
 
 # ===== ビルド版数刻印（リリース確認用）=====
-_BUILD_VERSION = "cash-ai-02 / src:CF_v27_1_capital_reconciliation / patch:配当推定を利益剰余金全体ベースに修正 / build:2026-08-24"
+_BUILD_VERSION = "cash-ai-02 / src:CF_v27_2_provision_scope / patch:諸引当金の判定を勘定科目名にも拡張し貸倒引当金は常に除外 / build:2026-08-25"
 _build_stamp_comment = f'<!-- BUILD_VERSION: {_BUILD_VERSION} -->'
 _build_stamp_visible = (
     f'<div data-build-version="{_BUILD_VERSION}"'
