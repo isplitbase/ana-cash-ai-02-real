@@ -3035,6 +3035,12 @@ window._rebuildCFTable = function(){
       function _ryudoTotal(pk){
         var cand=["流動資産合計","流動資産計","流動資産の部合計"];
         for(var i=0;i<cand.length;i++){ if(cand[i] in nameIdx) return acctFirst(nameIdx,[cand[i]],pk); }
+        // v27-5: 合計行がなくても「流動資産」見出し行が金額を持てば合計値として使う
+        //   （入れ子小計を持つ帳票で明細合算による小計二重計上を防ぐ）
+        if("流動資産" in nameIdx){
+          var head=acctFirst(nameIdx,["流動資産"],pk);
+          if(head!==0) return head;
+        }
         return sectionSum(_data,["流動資産"],pk,{});
       }
       function _c17other(pk){
@@ -4958,6 +4964,17 @@ def calc_cf_from_data_dict(data_dict, closing_dates):
                 if _nm in name_idx:
                     _mark_used(_nm)
                     return _acct_first(name_idx, data_dict, [_nm], period)
+            # v27-5: 合計行がなくても「流動資産」見出し行が金額を持つ場合はそれを合計値として使う。
+            #   入れ子小計（当座資産/棚卸資産/その他流動資産）を持つ帳票では、
+            #   明細を単純合算すると小計行を二重計上して過大になるため見出し行を優先する。
+            #   財務諸表の慣行上、見出し行に金額があればそれは分類の合計値。
+            #   （ai_case 21425 で今期照合差 +516,697,188 が発生していた）
+            if '流動資産' in name_idx:
+                _head = _acct_first(name_idx, data_dict, ['流動資産'], period)
+                if _head != 0:
+                    _mark_used('流動資産')
+                    return _head
+            # 見出し行が0の場合のみ明細合算にフォールバック
             return _section_sum_tracked(['流動資産'], period)
         def _cash_at(period):
             return genkin_to if period == p_to else (genkin_from if period == p_from else 0.0)
@@ -5594,7 +5611,7 @@ except Exception as _e:
     traceback.print_exc()
 
 # ===== ビルド版数刻印（リリース確認用）=====
-_BUILD_VERSION = "cash-ai-02 / src:CF_v27_4_c17_residual / patch:c17を残差版に復元し流動資産の取りこぼしを解消 / build:2026-08-26"
+_BUILD_VERSION = "cash-ai-02 / src:CF_v27_5_nested_subtotal / patch:c17残差版の入れ子小計対応（水野レビュー反映） / build:2026-08-26"
 _build_stamp_comment = f'<!-- BUILD_VERSION: {_BUILD_VERSION} -->'
 _build_stamp_visible = (
     f'<div data-build-version="{_BUILD_VERSION}"'
