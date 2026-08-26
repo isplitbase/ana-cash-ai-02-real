@@ -4459,6 +4459,34 @@ def detect_unassigned_accounts(data_dict, used_names=None):
 # ==================================================================
 # 不整合自動検知・修正（validate_and_fix_data）
 # ==================================================================
+# ==================================================================
+# v27-6: 期データ欠損の判定
+#   2期分しかアップロードされていない案件では前々期が全ゼロになり、
+#   前期の期首残高が取れないため前期CFは構造的に計算できない。
+#   照合差を出すより「データ期間不足」と明示する方が親切。
+# ==================================================================
+def _is_period_data_missing(data_dict, period):
+    """指定期のB/S主要行がすべてゼロ（＝データ未取得）かを判定する。
+
+    現金・資産合計・負債合計・負債純資産合計 のいずれも 0 の場合に
+    「その期のデータが無い」とみなす。1つでも非ゼロなら False。
+    """
+    _idx = _build_name_index(data_dict)
+    _keys = ["現金・預金", "現金及び預金", "資産合計",
+             "負債合計", "負債・純資産合計", "純資産・負債合計"]
+    for _nm in _keys:
+        _rn = _idx.get(_nm)
+        if _rn is None:
+            continue
+        _v0 = data_dict.get(_rn, {}).get(period, 0)
+        try:
+            if _v0 not in (None, "", '""') and float(_v0) != 0:
+                return False
+        except Exception:
+            continue
+    return True
+
+
 def validate_and_fix_data(data_dict, closing_dates):
     """
     CF計算前にdata_dictの不整合を検知し、可能な範囲で自動修正する。
@@ -4474,6 +4502,7 @@ def validate_and_fix_data(data_dict, closing_dates):
     """
     alerts = []
     fixes  = []
+    notes  = []   # v27-6: 情報通知（警告ではない）
     PERIODS = ['前々期', '前期', '今期']
 
     name_idx = _build_name_index(data_dict)
@@ -4550,6 +4579,17 @@ def validate_and_fix_data(data_dict, closing_dates):
             ('前期', _cf_check['zenki'], '前期'),
             ('今期', _cf_check['konki'], '今期'),
         ]:
+            # v27-6: 前期CFは前々期を期首とするため、前々期データが無い案件
+            #   （2期分のみアップロード等）では構造的に計算できない。
+            #   照合差を出さず「データ期間不足」として通知する。
+            if label == '前期' and _is_period_data_missing(data_dict, '前々期'):
+                notes.append(
+                    '[データ期間不足][前期] 前々期のB/Sデータが無いため、'
+                    '前期キャッシュ・フローは計算できません'
+                    '（前期の期首残高が取得できないため）。'
+                    '前期CFが必要な場合は前々期の決算書もアップロードしてください。'
+                )
+                continue
             c50 = cf_dict.get('c50', 0)
             c48 = cf_dict.get('c48', 0)
             c49 = cf_dict.get('c49', 0)
@@ -4574,12 +4614,12 @@ def validate_and_fix_data(data_dict, closing_dates):
     except Exception as _e:
         alerts.append(f'[CF検証エラー] {_e}')
 
-    return alerts, fixes
+    return alerts, fixes, notes   # v27-6: notes を追加
 
 
-def format_validation_log(alerts, fixes):
+def format_validation_log(alerts, fixes, notes=None):   # v27-6: notes 追加
     """アラート・修正ログをHTML形式で返す"""
-    if not alerts and not fixes:
+    if not alerts and not fixes and not notes:
         return ''
     parts = []
     if fixes:
@@ -4595,6 +4635,14 @@ def format_validation_log(alerts, fixes):
             'border-radius:4px;padding:8px 12px;margin:6px 0;font-size:11px;">'
             '<b>⚠️ 要確認アラート（' + str(len(alerts)) + '件）</b><br>'
             + '<br>'.join(alerts) + '</div>'
+        )
+    # v27-6: 情報通知（青枠）。警告ではなく「計算できない理由」の説明。
+    if notes:
+        parts.append(
+            '<div style="background:#e7f3fe;border:1px solid #2196f3;'
+            'border-radius:4px;padding:8px 12px;margin:6px 0;font-size:11px;">'
+            '<b>ℹ️ データ期間に関するお知らせ（' + str(len(notes)) + '件）</b><br>'
+            + '<br>'.join(notes) + '</div>'
         )
     return ''.join(parts)
 
@@ -5565,8 +5613,8 @@ def generate_keiei_shihyo_html(data_dict, closing_dates):
 # ------------------------------------------------------------------
 try:
     # 不整合自動検知・修正
-    _alerts, _fixes = validate_and_fix_data(data_dict, closing_dates)
-    _validation_html = format_validation_log(_alerts, _fixes)
+    _alerts, _fixes, _notes = validate_and_fix_data(data_dict, closing_dates)   # v27-6
+    _validation_html = format_validation_log(_alerts, _fixes, _notes)
     if _fixes:  print("[自動修正]", " / ".join(_fixes))
     if _alerts: print("[アラート]", " / ".join(_alerts))
 
@@ -5611,7 +5659,7 @@ except Exception as _e:
     traceback.print_exc()
 
 # ===== ビルド版数刻印（リリース確認用）=====
-_BUILD_VERSION = "cash-ai-02 / src:CF_v27_5_nested_subtotal / patch:c17残差版の入れ子小計対応（水野レビュー反映） / build:2026-08-26"
+_BUILD_VERSION = "cash-ai-02 / src:CF_v27_6_period_guard / patch:前々期データ欠損時は前期CFを計算不能として明示 / build:2026-08-26"
 _build_stamp_comment = f'<!-- BUILD_VERSION: {_BUILD_VERSION} -->'
 _build_stamp_visible = (
     f'<div data-build-version="{_BUILD_VERSION}"'
