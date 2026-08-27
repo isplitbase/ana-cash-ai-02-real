@@ -4757,7 +4757,7 @@ def detect_data_anomalies(data_dict, closing_dates, extra=None):
 
             def _norm_acct(s):
                 s = re.sub(r'[0-9０-９]+$', '', s)          # 末尾の連番を除去
-                s = re.sub(r'[s　・･,，、.．-−_]', '', s)  # 区切り記号を除去
+                s = re.sub(r'[\s\u3000\u30fb\uff65,\uff0c\u3001.\uff0e_\-\u2212]', '', s)  # 区切り記号を除去
                 return s
 
             _sim = []
