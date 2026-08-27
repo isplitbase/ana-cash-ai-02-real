@@ -4740,6 +4740,51 @@ def detect_data_anomalies(data_dict, closing_dates, extra=None):
                         'items': [n1, n2],
                     })
 
+    # ── 【A-2】v27-7: 現金・預金の合算元口座名から重複読み取りを検知 ──
+    #   cash-ai-01 が複数口座を「現金・預金」1行に合算するため、
+    #   合算後の data_dict には個別口座の行が残らず、上の【A】では
+    #   構造的に口座単位の重複を検出できない。
+    #   そこで集計方法テキスト（例:「現金＋当座ひまわり＋普通ひまわり＋
+    #   普通ひま2を合算」）に残る口座名から、末尾連番違い・略称違いの
+    #   類似ペアを抽出して「同一口座の二重計上の疑い」を警告する。
+    #   検知のみで金額の修正は行わない（人間判断のための材料提供）。
+    _cash_row = _find_row('現金・預金') or _find_row('現金及び預金')
+    if _cash_row:
+        _method = str(_cash_row.get('集計方法', '') or '')
+        if '合算' in _method:
+            _body = _method.split('を合算')[0]
+            _accounts = [a.strip() for a in re.split(r'[＋+]', _body) if a.strip()]
+
+            def _norm_acct(s):
+                s = re.sub(r'[0-9０-９]+$', '', s)          # 末尾の連番を除去
+                s = re.sub(r'[s　・･,，、.．-−_]', '', s)  # 区切り記号を除去
+                return s
+
+            _sim = []
+            for _i in range(len(_accounts)):
+                for _j in range(_i + 1, len(_accounts)):
+                    _a, _b = _accounts[_i], _accounts[_j]
+                    _na, _nb = _norm_acct(_a), _norm_acct(_b)
+                    # 正規化後が2文字未満の語は誤検知しやすいので除外
+                    if len(_na) < 2 or len(_nb) < 2:
+                        continue
+                    # 一方が他方の前方部分文字列 = 同一口座の表記ゆれの疑い
+                    if _na == _nb or _na.startswith(_nb) or _nb.startswith(_na):
+                        _sim.append((_a, _b))
+
+            if _sim:
+                _pairs = '、'.join(f'「{x}」と「{y}」' for x, y in _sim[:3])
+                anomalies.append({
+                    'type': 'A', 'severity': 'warning',
+                    'title': '現金・預金の口座名に重複読み取りの疑い',
+                    'detail': f'現金・預金の合算元に {_pairs} があり、'
+                              f'同一口座を二重に読み取っている可能性があります。'
+                              f'（合算元: {_body}）',
+                    'suggestion': '帳票を確認し、これらが別口座かご確認ください。'
+                                  '同一口座であれば、重複分を除いて再読取してください。',
+                    'items': [x for pair in _sim[:3] for x in pair],
+                })
+
     # ── 【D】製造原価の誤混入 ──────────────────────
     if extra and '製造原価' in extra and extra['製造原価']:
         sei = extra['製造原価']
@@ -5659,7 +5704,7 @@ except Exception as _e:
     traceback.print_exc()
 
 # ===== ビルド版数刻印（リリース確認用）=====
-_BUILD_VERSION = "cash-ai-02 / src:CF_v27_6_period_guard / patch:前々期データ欠損時は前期CFを計算不能として明示 / build:2026-08-26"
+_BUILD_VERSION = "cash-ai-02 / src:CF_v27_7_cash_account_dup / patch:現金合算元の口座名から重複読み取りを検知 / build:2026-08-27"
 _build_stamp_comment = f'<!-- BUILD_VERSION: {_BUILD_VERSION} -->'
 _build_stamp_visible = (
     f'<div data-build-version="{_BUILD_VERSION}"'
