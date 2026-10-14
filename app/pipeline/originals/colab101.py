@@ -5460,6 +5460,547 @@ def generate_cf_html(cf_data):
 
 
 # ------------------------------------------------------------------
+# 変動PL＆BEP（損益分岐点）分析 HTML生成
+#   2026-06-25 のソース全面差し替え時に欠落していたため、
+#   cash-ai-02-excel（Excel側で現役稼働中）から移植して復旧 (2026-10-14)
+#   ※ヘルパー(fmt_num/fmt_pct/sep_row/data_row/pct_only_row)は関数内に閉じている
+# ------------------------------------------------------------------
+def generate_hendo_pl_bep_html(data_dict, closing_dates):
+    """
+    変動PL＆BEP分析表（単位：円）。
+    売上原価は明細行を展開、販管費はF/V区分明細を展開。
+
+    data_dict行番号マッピング（財務諸表シート行 - 17 = dict行番号）:
+    ---- 売上原価明細 ----
+      112: 売上高
+      113: 期首製品・商品棚高
+      114: 商品仕入高 [V]
+      115: 当期製造原価 [V（製造原価報告書入力済の場合内訳展開）]
+      116: 他勘定振替高
+      117: (▲)期末製品・商品棚卸高
+      118: 期首-期末製品差額(V) ※表示用（113-117の差）
+      119: 売上原価合計
+    ---- 製造原価報告書（入力時のみ） ----
+      79:  当期材料費（V）
+      80〜83: 労務費 賃金/賞与/退職金/厚生費 [F]
+      84:  当期労務費
+      85:  製造経費 減価償却費 [F]
+      86:  外注加工費 [V]
+      87:  消耗品費 [V]
+      106: 当期製造原価
+    ---- 販管費明細（全F） ----
+      121: 役員報酬
+      122: 給与・賞与
+      123: 退職金
+      124: 法定福利費・福利厚生費
+      125: 減価償却費
+      126: 貸倒償却費
+      127: 取扱手数料
+      128: 旅費交通費
+      129: 支払手数料
+      130: 荷造運賃
+      131: 地代家賃
+      132: 保険料
+      133: 租税公課
+      134: 広告宣伝費
+      135: 水道光熱費
+      136: 事務用・備品消耗品費
+      137: 通信費
+      138: その他雑費
+      139: 販管費合計
+    ---- 営業外収支 ----
+      145: 受取利息・配当
+      146: 雑収入
+      148: 営業外収入合計
+      150: 支払利息割引料
+      151: 営業外支出その他
+      152: 営業外支出合計
+    ---- 損益 ----
+      140: 営業利益
+      149: 経常利益
+      153: 特別利益
+      154: 特別損失
+      156: 税引前当期利益
+      157: 法人税等
+      158: 当期利益
+      161: 減価償却費合計（B/Sより算出）
+    """
+    pkeys = ["前々期", "前期", "今期"]
+
+    def rv(row_no, pk):
+        r = data_dict.get(row_no, {})
+        v = r.get(pk, 0)
+        try:
+            return float(v) if v not in (None, "", '""') else 0.0
+        except (ValueError, TypeError):
+            return 0.0
+
+    p_labels = {pk: (closing_dates.get(pk) or pk) for pk in pkeys}
+
+    # ─────────────────────────────
+    # 計算
+    # ─────────────────────────────
+    def calc(pk):
+        sales   = rv(112, pk)
+
+        # 売上原価明細
+        kiisho  = rv(113, pk)   # 期首製品・商品棚高
+        shonin  = rv(114, pk)   # 商品仕入高
+        seizo   = rv(115, pk)   # 当期製造原価
+        hoka    = rv(116, pk)   # 他勘定振替高（控除）
+        kimate  = rv(117, pk)   # 期末製品・商品棚卸高（控除）
+        cogs    = rv(119, pk)   # 売上原価合計
+
+        # 販管費明細（全F）
+        hankanha_meisai = {
+            "役員報酬":          rv(121, pk),
+            "給与・賞与":        rv(122, pk),
+            "退職金":            rv(123, pk),
+            "法定福利費・福利厚生費": rv(124, pk),
+            "減価償却費":        rv(125, pk),
+            "貸倒償却費":        rv(126, pk),
+            "取扱手数料":        rv(127, pk),
+            "旅費交通費":        rv(128, pk),
+            "支払手数料":        rv(129, pk),
+            "荷造運賃":          rv(130, pk),
+            "地代家賃":          rv(131, pk),
+            "保険料":            rv(132, pk),
+            "租税公課":          rv(133, pk),
+            "広告宣伝費":        rv(134, pk),
+            "水道光熱費":        rv(135, pk),
+            "事務用・備品消耗品費": rv(136, pk),
+            "通信費":            rv(137, pk),
+            "その他雑費":        rv(138, pk),
+        }
+        hankanha = rv(139, pk)
+
+        # 営業外収支
+        uketori_risoku  = rv(145, pk)
+        zatsu_shuunyuu  = rv(146, pk)
+        eizai_in_total  = rv(148, pk)
+        shiharai_risoku = rv(150, pk)
+        eizai_son_hoka  = rv(151, pk)
+        eizai_out_total = rv(152, pk)
+        eizai_net       = eizai_out_total - eizai_in_total  # 純支出（固定費扱い）
+
+        # 損益
+        eigyo_rieki  = rv(140, pk)
+        keijyo       = rv(149, pk)
+        toku_rieki   = rv(153, pk)
+        toku_son     = rv(154, pk)
+        zeibiki_mae  = rv(156, pk)
+        zeikin       = rv(157, pk)
+        net_rieki    = rv(158, pk)
+        dep          = rv(161, pk)
+
+        # 変動費・固定費
+        hendo_total  = cogs
+        genkai       = sales - hendo_total
+        genkai_rate  = genkai / sales if sales else 0
+        kotei_total  = hankanha + eizai_net
+        bep          = kotei_total / genkai_rate if genkai_rate else 0
+        bep_ratio    = bep / sales if sales else 0
+
+        return {
+            "売上高":            sales,
+            "期首製品・商品棚高":  kiisho,
+            "商品仕入高":         shonin,
+            "当期製造原価":       seizo,
+            "他勘定振替高":       hoka,
+            "期末製品・商品棚卸高": kimate,
+            "売上原価合計":       cogs,
+            "hankanha_meisai":   hankanha_meisai,
+            "販管費合計":         hankanha,
+            "営業外収入合計":     eizai_in_total,
+            "  受取利息・配当":   uketori_risoku,
+            "  雑収入":          zatsu_shuunyuu,
+            "営業外支出合計":     eizai_out_total,
+            "  支払利息割引料":   shiharai_risoku,
+            "  営業外支出その他": eizai_son_hoka,
+            "営業外収支純額(F)":  eizai_net,
+            "変動費合計":         hendo_total,
+            "限界利益":           genkai,
+            "限界利益率":         genkai_rate,
+            "固定費合計":         kotei_total,
+            "営業利益":           eigyo_rieki,
+            "経常利益":           keijyo,
+            "特別利益":           toku_rieki,
+            "特別損失":           toku_son,
+            "税引前利益":         zeibiki_mae,
+            "法人税等":           zeikin,
+            "当期利益":           net_rieki,
+            "減価償却費(参考)":   dep,
+            "損益分岐点売上高":   bep,
+            "損益分岐点比率":     bep_ratio,
+        }
+
+    calcs = {pk: calc(pk) for pk in pkeys}
+
+    # ─────────────────────────────
+    # スタイル定義
+    # ─────────────────────────────
+    LV1_BG, LV1_FG   = "#1B4F72", "#ffffff"
+    LV2_BG, LV2_FG   = "#2E86C1", "#ffffff"
+    LV3_BG, LV3_FG   = "#5DADE2", "#ffffff"
+    LV4_BG, LV4_FG   = "#D6EAF8", "#1a1a1a"
+    LVSUB_BG, LVSUB_FG = "#EBF5FB", "#333333"
+    LV0_BG, LV0_FG   = "#0A2A45", "#ffffff"   # 大見出し
+    BEP_BG, BEP_FG   = "#fff9c4", "#555555"
+    HDR_BG, HDR_FG   = "#f2f2f2", "#333333"
+    V_BG              = "#E8F8F5"   # 変動費帯
+    F_BG              = "#FEF9E7"   # 固定費帯
+    ZERO_COLOR        = "#aaaaaa"
+
+    def fmt_num(v):
+        if v is None: return "―"
+        try:
+            iv = int(round(float(v)))
+            if iv == 0:
+                return f'<span style="color:{ZERO_COLOR};">0</span>'
+            return f"{iv:,}"
+        except:
+            return "―"
+
+    def fmt_pct(v):
+        if v is None: return "―"
+        try:
+            fv = float(v)
+            if fv == 0:
+                return f'<span style="color:{ZERO_COLOR};">0.00%</span>'
+            return f"{fv * 100:.2f}%"
+        except:
+            return "―"
+
+    def th(txt, bg=HDR_BG, fg=HDR_FG, align="center", colspan=1, rowspan=1, small=False):
+        cs = f' colspan="{colspan}"' if colspan > 1 else ""
+        rs = f' rowspan="{rowspan}"' if rowspan > 1 else ""
+        fs = "11px" if small else "12px"
+        return (
+            f'<th{cs}{rs} style="background:{bg};color:{fg};padding:4px 6px;'
+            f'border:1px solid #999;font-size:{fs};text-align:{align};white-space:nowrap;">'
+            f'{txt}</th>'
+        )
+
+    def td_lbl(txt, bg=LV4_BG, fg=LV4_FG, indent=0, bold=False, colspan=1, italic=False):
+        bw = "font-weight:bold;" if bold else ""
+        it = "font-style:italic;" if italic else ""
+        cs = f' colspan="{colspan}"' if colspan > 1 else ""
+        pad = f"padding:3px 6px 3px {6 + indent * 12}px;"
+        return (
+            f'<td{cs} style="background:{bg};color:{fg};{bw}{it}{pad}'
+            f'border:1px solid #ddd;font-size:12px;white-space:nowrap;">{txt}</td>'
+        )
+
+    def td_val(v, bg=LV4_BG, fg=LV4_FG, bold=False, pct=False, colspan=1, cell_id=""):
+        bw = "font-weight:bold;" if bold else ""
+        cs = f' colspan="{colspan}"' if colspan > 1 else ""
+        id_attr = f' id="{cell_id}"' if cell_id else ""
+        val_str = fmt_pct(v) if pct else fmt_num(v)
+        return (
+            f'<td{cs}{id_attr} style="background:{bg};color:{fg};{bw}padding:3px 8px;'
+            f'border:1px solid #ddd;font-size:12px;text-align:right;'
+            f'font-family:Consolas,monospace;white-space:nowrap;">{val_str}</td>'
+        )
+
+    def sep_row(label="", bg="#dee2e6", fg="#333", colspan=8):
+        if label:
+            return (
+                f'<tr><td colspan="{colspan}" style="background:{bg};color:{fg};'
+                f'font-weight:bold;font-size:11px;padding:2px 8px;border:none;">{label}</td></tr>'
+            )
+        return f'<tr><td colspan="{colspan}" style="height:3px;background:{bg};border:none;"></td></tr>'
+
+    # ─────────────────────────────
+    # ヘッダー
+    # ─────────────────────────────
+    n_col = 2 + len(pkeys) * 2  # ラベル2 + (金額+売上比)×3期
+
+    hdr1 = (
+        th("項　目", align="left", rowspan=2, colspan=2, bg=HDR_BG)
+        + "".join(th(p_labels[pk], colspan=2, bg=HDR_BG) for pk in pkeys)
+    )
+    hdr2 = "".join(
+        th("金額（円）", bg=HDR_BG) + th("売上比", bg=HDR_BG, small=True)
+        for _ in pkeys
+    )
+    thead = f"<thead><tr>{hdr1}</tr><tr>{hdr2}</tr></thead>"
+
+    # ─────────────────────────────
+    # 行生成ヘルパー
+    # ─────────────────────────────
+    def data_row(label, key, bg=LV4_BG, fg=LV4_FG, indent=0, bold=False,
+                 pct_key=None, neg=False, italic=False, show_zero=True, bep_id=""):
+        """通常データ行（金額＋売上比）。bep_id指定時はセルにID付与でJS再計算対象になる"""
+        pk_map = {"前々期": "zzk", "前期": "zk", "今期": "kk"}
+        row = "<tr>"
+        row += td_lbl(label, bg=bg, fg=fg, indent=indent, bold=bold, italic=italic)
+        row += f'<td style="background:{bg};border:1px solid #ddd;width:6px;"></td>'
+        for pk in pkeys:
+            v = calcs[pk].get(key, 0)
+            if neg:
+                v = -v
+            sales = calcs[pk]["売上高"]
+            ratio = v / sales if sales else 0
+            cid = f"bep-{bep_id}-{pk_map[pk]}" if bep_id else ""
+            rid = f"bep-{bep_id}-pct-{pk_map[pk]}" if bep_id else ""
+            if not show_zero and v == 0:
+                row += f'<td style="background:{bg};border:1px solid #ddd;"></td>'
+                row += f'<td style="background:{bg};border:1px solid #ddd;"></td>'
+            else:
+                row += td_val(v, bg=bg, fg=fg, bold=bold, cell_id=cid)
+                row += td_val(ratio, bg=bg, fg=fg, bold=bold, pct=True, cell_id=rid)
+        row += "</tr>"
+        return row
+
+    def pct_only_row(label, key, bg=BEP_BG, fg=BEP_FG, indent=0, bold=False, bep_id=""):
+        """比率のみ行（BEP比率など）"""
+        pk_map = {"前々期": "zzk", "前期": "zk", "今期": "kk"}
+        row = "<tr>"
+        row += td_lbl(label, bg=bg, fg=fg, indent=indent, bold=bold)
+        row += f'<td style="background:{bg};border:1px solid #ddd;"></td>'
+        for pk in pkeys:
+            v = calcs[pk].get(key, 0)
+            cid = f"bep-{bep_id}-{pk_map[pk]}" if bep_id else ""
+            row += td_val(v, bg=bg, fg=fg, bold=bold, pct=True, colspan=2, cell_id=cid)
+        row += "</tr>"
+        return row
+
+    # ─────────────────────────────
+    # 本体構築
+    # ─────────────────────────────
+    rows = []
+
+    # ── 売上高
+    rows.append(sep_row("", bg="#C0D8EA"))
+    rows.append(data_row("売上高", "売上高", bg=LV1_BG, fg=LV1_FG, bold=True, bep_id="sales"))
+
+    # ── 変動費ブロック
+    _ncol = 2 + len(pkeys) * 2
+    rows.append(sep_row("▼ 変動費（売上原価）", bg=V_BG, fg="#1a6644"))
+    rows.append(data_row("変動費（売上原価合計）", "売上原価合計",
+                          bg=LV2_BG, fg=LV2_FG, bold=True, bep_id="hendo"))
+
+    # 売上原価明細
+    rows.append(data_row("　期首製品・商品棚高",  "期首製品・商品棚高",
+                          bg=LVSUB_BG, fg=LVSUB_FG, indent=1, show_zero=True))
+    rows.append(data_row("　商品仕入高",         "商品仕入高",
+                          bg=LVSUB_BG, fg=LVSUB_FG, indent=1))
+    rows.append(data_row("　当期製造原価",        "当期製造原価",
+                          bg=LVSUB_BG, fg=LVSUB_FG, indent=1, show_zero=False))
+    rows.append(data_row("　他勘定振替高",        "他勘定振替高",
+                          bg=LVSUB_BG, fg=LVSUB_FG, indent=1, show_zero=False))
+    rows.append(data_row("　(▲)期末製品・商品棚卸高", "期末製品・商品棚卸高",
+                          bg=LVSUB_BG, fg=LVSUB_FG, indent=1, neg=True))
+
+    # ── 製造原価V科目ゾーン（初期非表示。JS が F→V 切替時に行を挿入する）
+    rows.append(
+        f'<tr id="bep-mfg-v-zone-header" style="display:none;">'
+        f'<td colspan="{_ncol}" style="background:{LV3_BG};color:{LV3_FG};'
+        f'font-weight:bold;font-size:12px;padding:3px 6px 3px 18px;'
+        f'border:1px solid #bbb;white-space:nowrap;">'
+        f'　製造原価内訳科目（V）</td></tr>'
+    )
+    rows.append('<tr id="bep-mfg-v-zone-anchor"></tr>')
+
+    # ── 販管費V科目ゾーン（初期非表示）
+    rows.append(
+        f'<tr id="bep-sga-v-zone-header" style="display:none;">'
+        f'<td colspan="{_ncol}" style="background:{LV3_BG};color:{LV3_FG};'
+        f'font-weight:bold;font-size:12px;padding:3px 6px 3px 18px;'
+        f'border:1px solid #bbb;white-space:nowrap;">'
+        f'　販管費内訳科目（V）</td></tr>'
+    )
+    rows.append('<tr id="bep-sga-v-zone-anchor"></tr>')
+
+    # ── 限界利益
+    rows.append(sep_row("", bg="#A9CCE3"))
+
+    # 限界利益率サマリー
+    pk_map = {"前々期": "zzk", "前期": "zk", "今期": "kk"}
+    genkai_row = "<tr>"
+    genkai_row += td_lbl("限界利益率（参考）", bg=LV3_BG, fg=LV3_FG, bold=True)
+    genkai_row += f'<td style="background:{LV3_BG};border:1px solid #ddd;"></td>'
+    for pk in pkeys:
+        rate = calcs[pk]["限界利益率"]
+        cid = f"bep-genkai-rate-{pk_map[pk]}"
+        genkai_row += (
+            f'<td colspan="2" id="{cid}" style="background:{LV3_BG};color:{LV3_FG};font-weight:bold;'
+            f'padding:4px 8px;border:1px solid #bbb;font-size:13px;text-align:center;">'
+            f'{rate*100:.2f}%</td>'
+        )
+    genkai_row += "</tr>"
+    rows.append(genkai_row)
+
+    rows.append(data_row("限界利益", "限界利益", bg=LV1_BG, fg=LV1_FG, bold=True, bep_id="genkai"))
+
+    # ── 固定費ブロック
+    rows.append(sep_row("▼ 固定費", bg=F_BG, fg="#7D6608"))
+    rows.append(data_row("固定費合計", "固定費合計",
+                          bg=LV2_BG, fg=LV2_FG, bold=True, bep_id="kotei"))
+
+    # ── 製造原価F科目ゾーン（初期非表示。V→F 切替時に行がここへ移動する）
+    # 「製造原価内訳科目(F)」小見出し行（販売管理費合計と同じ水色 LV3）
+    rows.append(
+        f'<tr id="bep-mfg-f-subtitle" style="display:none;">'
+        f'<td colspan="{_ncol}" style="background:{LV3_BG};color:{LV3_FG};'
+        f'font-weight:bold;font-size:12px;padding:3px 6px 3px 18px;'
+        f'border:1px solid #bbb;white-space:nowrap;">'
+        f'　製造原価内訳科目（F）</td></tr>'
+    )
+    rows.append('<tr id="bep-mfg-f-zone-anchor"></tr>')
+
+    # 製造原価明細行（区分付き・F/V切替可）をBEPテーブルに追加
+    # 勘定科目名はdata_dictから動的取得（ユーザー定義のため）
+    _mfg_rows = list(range(85, 89)) + list(range(90, 105))  # 85〜88, 90〜104
+    for _rn in _mfg_rows:
+        _row = data_dict.get(_rn, {})
+        _subj = str(_row.get("勘定科目", "") or "").strip()
+        _kubun = str(_row.get("区分", "") or "").strip().replace("Ｆ","F").replace("Ｖ","V").upper()
+        if not _subj or _kubun not in ("F","V"):
+            continue  # 科目名なし・区分なしはスキップ
+        _sk = f"mfg{_rn}"  # safe_key: "mfg85" 等
+        _init_fv_state = _kubun
+        _bg = V_BG if _kubun == "V" else LV4_BG
+        _fg = "#1a6644" if _kubun == "V" else LV4_FG
+        r = (f'<tr id="bep-mfg-row-{_sk}"'
+             f' data-fv-key="{_sk}" data-fv-label="{_subj}"'
+             f' data-fv-state="{_init_fv_state}" data-fv-type="mfg">')
+        _lbl_html = (
+            f"　　{_subj}"
+            + (f' <span style="background:#27ae60;color:#fff;font-size:10px;'
+               f'padding:1px 5px;border-radius:3px;margin-left:4px;font-weight:bold;">V</span>'
+               if _kubun == "V" else "")
+        )
+        r += f'<td style="background:{_bg};color:{_fg};padding:3px 6px 3px 30px;border:1px solid #ddd;font-size:12px;white-space:nowrap;">{_lbl_html}</td>'
+        r += f'<td style="background:{_bg};border:1px solid #ddd;"></td>'
+        for pk in pkeys:
+            _v = float(_row.get(pk, 0) or 0)
+            _sales = calcs[pk]["売上高"]
+            _ratio = _v / _sales if _sales else 0
+            _pk_s = {"前々期":"zzk","前期":"zk","今期":"kk"}[pk]
+            _cid = f"bep-mfg-{_sk}-{_pk_s}"
+            _rid = f"bep-mfg-{_sk}-pct-{_pk_s}"
+            _val_str = (f'<span style="color:#aaaaaa;">0</span>' if int(round(_v))==0
+                        else f"{int(round(_v)):,}")
+            _pct_str = (f'<span style="color:#aaaaaa;">0.00%</span>' if _ratio==0
+                        else f"{_ratio*100:.2f}%")
+            r += (f'<td id="{_cid}" style="background:{_bg};color:{_fg};padding:3px 8px;'
+                  f'border:1px solid #ddd;font-size:12px;text-align:right;'
+                  f'font-family:Consolas,monospace;white-space:nowrap;">{_val_str}</td>')
+            r += (f'<td id="{_rid}" style="background:{_bg};color:{_fg};padding:3px 8px;'
+                  f'border:1px solid #ddd;font-size:12px;text-align:right;'
+                  f'font-family:Consolas,monospace;white-space:nowrap;">{_pct_str}</td>')
+        r += "</tr>"
+        rows.append(r)
+
+    # 販管費
+    rows.append(data_row("　販売管理費合計（F）", "販管費合計",
+                          bg=LV3_BG, fg=LV3_FG, indent=1, bold=True, bep_id="hankanha"))
+    rows.append('<tr id="bep-hankanha-f-anchor" style="display:none;"></tr>')
+
+    hankanha_items = [
+        ("役員報酬", "役員報酬"),
+        ("給与・賞与", "給与・賞与"),
+        ("退職金", "退職金"),
+        ("法定福利費・福利厚生費", "法定福利費・福利厚生費"),
+        ("減価償却費", "減価償却費"),
+        ("貸倒償却費", "貸倒償却費"),
+        ("取扱手数料", "取扱手数料"),
+        ("旅費交通費", "旅費交通費"),
+        ("支払手数料", "支払手数料"),
+        ("荷造運賃", "荷造運賃"),
+        ("地代家賃", "地代家賃"),
+        ("保険料", "保険料"),
+        ("租税公課", "租税公課"),
+        ("広告宣伝費", "広告宣伝費"),
+        ("水道光熱費", "水道光熱費"),
+        ("事務用・備品消耗品費", "事務用・備品消耗品費"),
+        ("通信費", "通信費"),
+        ("その他雑費", "その他雑費"),
+    ]
+
+    for lbl, key in hankanha_items:
+        # hankanha_meisaiから値を取る特別処理（BEP再計算用ID付与）
+        safe_key = key.replace("・", "-").replace(" ", "-").replace("／", "-").replace("　", "")
+        r = (f'<tr id="bep-hk-row-{safe_key}"'
+             f' data-fv-key="{safe_key}" data-fv-label="{lbl}"'
+             f' data-fv-state="F" data-fv-type="sga">')
+        r += td_lbl(f"　　{lbl}", bg=LV4_BG, fg=LV4_FG, indent=2, bold=False)
+        r += f'<td style="background:{LV4_BG};border:1px solid #ddd;"></td>'
+        for pk in pkeys:
+            v = calcs[pk]["hankanha_meisai"].get(key, 0)
+            sales = calcs[pk]["売上高"]
+            ratio = v / sales if sales else 0
+            pk_s = {"前々期": "zzk", "前期": "zk", "今期": "kk"}[pk]
+            cid = f"bep-hk-{safe_key}-{pk_s}"
+            rid = f"bep-hk-{safe_key}-pct-{pk_s}"
+            r += td_val(v, bg=LV4_BG, fg=LV4_FG, bold=False, cell_id=cid)
+            r += td_val(ratio, bg=LV4_BG, fg=LV4_FG, bold=False, pct=True, cell_id=rid)
+        r += "</tr>"
+        rows.append(r)
+
+    # 営業外収支
+    rows.append(data_row("　営業外収支純額（F）", "営業外収支純額(F)",
+                          bg=LV3_BG, fg=LV3_FG, indent=1, bold=True, bep_id="eizai-net"))
+    rows.append(data_row("　　(▲)営業外収入合計", "営業外収入合計",
+                          bg=LV4_BG, fg=LV4_FG, indent=2, neg=True))
+    rows.append(data_row("　　　受取利息・配当", "  受取利息・配当",
+                          bg=LVSUB_BG, fg=LVSUB_FG, indent=3))
+    rows.append(data_row("　　　雑収入",         "  雑収入",
+                          bg=LVSUB_BG, fg=LVSUB_FG, indent=3))
+    rows.append(data_row("　　営業外支出合計",    "営業外支出合計",
+                          bg=LV4_BG, fg=LV4_FG, indent=2))
+    rows.append(data_row("　　　支払利息割引料",  "  支払利息割引料",
+                          bg=LVSUB_BG, fg=LVSUB_FG, indent=3))
+    rows.append(data_row("　　　営業外支出その他", "  営業外支出その他",
+                          bg=LVSUB_BG, fg=LVSUB_FG, indent=3))
+
+    # ── 経常利益以下
+    rows.append(sep_row("", bg="#A9CCE3"))
+    rows.append(data_row("営業利益",   "営業利益",  bg=LV1_BG, fg=LV1_FG, bold=True, bep_id="eigyo"))
+    rows.append(data_row("経常利益",   "経常利益",  bg=LV1_BG, fg=LV1_FG, bold=True, bep_id="keijyo"))
+    rows.append(sep_row(""))
+    rows.append(data_row("特別利益",   "特別利益",  bg=LVSUB_BG, fg=LVSUB_FG, indent=1, show_zero=False))
+    rows.append(data_row("特別損失",   "特別損失",  bg=LVSUB_BG, fg=LVSUB_FG, indent=1, show_zero=False))
+    rows.append(data_row("税引前利益", "税引前利益", bg=LV2_BG, fg=LV2_FG, bold=True))
+    rows.append(data_row("法人税等",   "法人税等",  bg=LVSUB_BG, fg=LVSUB_FG, indent=1))
+    rows.append(data_row("当期利益",   "当期利益",  bg=LV1_BG, fg=LV1_FG, bold=True))
+
+    # ── BEP
+    rows.append(sep_row("▼ 損益分岐点（BEP）", bg=BEP_BG, fg="#7D6608"))
+    rows.append(data_row("損益分岐点売上高", "損益分岐点売上高",
+                          bg=BEP_BG, fg=BEP_FG, bold=True, bep_id="bep-sales"))
+    rows.append(pct_only_row("損益分岐点比率", "損益分岐点比率",
+                              bg=BEP_BG, fg=BEP_FG, bold=True, bep_id="bep-ratio"))
+
+    # ── 参考
+    rows.append(sep_row(""))
+    rows.append(data_row("減価償却費（参考）", "減価償却費(参考)",
+                          bg=LVSUB_BG, fg=LVSUB_FG, indent=1, italic=True, show_zero=False))
+
+    table_html = (
+        f'<div style="overflow-x:auto;">'
+        f'<table style="border-collapse:collapse;width:100%;'
+        f'font-family:Meiryo,sans-serif;min-width:600px;">'
+        f'{thead}'
+        f'<tbody>{"".join(rows)}</tbody>'
+        f'</table></div>'
+    )
+
+    acc_id = "hendo_pl_bep"
+    return (
+        f'<div class="accordion-section">'
+        f'<button class="accordion-toggle" onclick="accToggle(\'{acc_id}\')">'
+        f'変動PL＆BEP（損益分岐点）分析'
+        f'<span class="acc-arrow">▼</span></button>'
+        f'<div class="accordion-body" id="acc-{acc_id}">'
+        f'<p style="margin:8px 0 6px;font-size:11px;color:#666;">'
+        f'※単位：円　変動費＝売上原価合計（商品仕入・製造原価等明細）　固定費＝販管費合計（全科目F）＋営業外収支純額（F）</p>'
+        f'{table_html}</div></div>'
+    )
+
+
+# ------------------------------------------------------------------
 # 経営指標調査表 HTML生成
 # ------------------------------------------------------------------
 def generate_keiei_shihyo_html(data_dict, closing_dates):
@@ -5696,7 +6237,10 @@ try:
         print(f"⚠️ 不整合検知でエラー: {_ae}")
 
     _keiei_html = generate_keiei_shihyo_html(data_dict, closing_dates)
-    full_html = full_html + _validation_html + _anomalies_html + generate_cf_html(_cf_data) + _approval_html + create_table_rows([(157, 159)], "入力項目／集計項目") + _keiei_html
+    # 変動PL＆BEP（損益分岐点）分析を復旧 (2026-10-14)
+    #   挿入位置は cash-ai-02-excel と同じ「CF計算書の後／入力項目の前」に揃える
+    _hendo_bep_html = generate_hendo_pl_bep_html(data_dict, closing_dates)
+    full_html = full_html + _validation_html + _anomalies_html + generate_cf_html(_cf_data) + _approval_html + _hendo_bep_html + create_table_rows([(157, 159)], "入力項目／集計項目") + _keiei_html
     print(f"✅ CF計算書HTML生成完了: 前期={_cf_data['period_zenki']}, 今期={_cf_data['period_konki']}")
 except Exception as _e:
     import traceback
