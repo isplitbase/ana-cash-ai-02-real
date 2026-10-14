@@ -6248,7 +6248,7 @@ except Exception as _e:
     traceback.print_exc()
 
 # ===== ビルド版数刻印（リリース確認用）=====
-_BUILD_VERSION = "cash-ai-02 / src:CF_v27_7_cash_account_dup / patch:現金合算元の口座名から重複読み取りを検知 / build:2026-08-27"
+_BUILD_VERSION = "cash-ai-02 / src:CF_v27_7_cash_account_dup / patch:変動PL＆BEP（損益分岐点）分析を復旧 / build:2026-10-14"
 _build_stamp_comment = f'<!-- BUILD_VERSION: {_BUILD_VERSION} -->'
 _build_stamp_visible = (
     f'<div data-build-version="{_BUILD_VERSION}"'
